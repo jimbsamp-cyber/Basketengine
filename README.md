@@ -34,7 +34,7 @@ To configure it:
 3. Select **New repository secret**, set the name to `ODDS_API_KEY`, and paste the key as its value.
 4. The next scheduled sync will attempt to retrieve available markets.
 
-Player-prop market access depends on the provider's sport coverage and subscription. The app will not invent odds if a market is unavailable. Never paste the key into chat, source code, or a public file.
+When the provider supports it, the sync also requests points, rebounds and assists props for up to four upcoming NBA games once daily. This event-level market may require a paid provider plan. The app will not invent odds if a market is unavailable. Never paste the key into chat, source code, or a public file.
 
 ## Build locally
 
@@ -46,7 +46,7 @@ npm run build
 
 ## Hosting
 
-GitHub Pages deployment is handled by `.github/workflows/deploy-pages.yml` after code changes and dataset updates. The data-sync workflow is `.github/workflows/sync-data.yml`.
+The `.github/workflows/sync-data.yml` workflow performs the scheduled data sync, builds the frontend and deploys the refreshed dataset to GitHub Pages. `.github/workflows/deploy-pages.yml` is retained as a manual redeployment fallback.
 
 ## Important model limitations
 
