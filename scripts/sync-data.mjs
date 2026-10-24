@@ -7,7 +7,6 @@ const LEAGUES = [
   { key: "EuroLeague", name: "EuroLeague", sport: "euroleague", url: "https://site.api.espn.com/apis/site/v2/sports/basketball/euroleague/scoreboard" }
 ];
 const now = new Date();
-const fullBackfill = process.env.FULL_BACKFILL === "true";
 const isoDay = d => d.toISOString().slice(0, 10);
 const dayParam = d => isoDay(d).replaceAll("-", "");
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -100,6 +99,7 @@ function parsePlayerStats(summary, game) {
 }
 let old = { schemaVersion: 1, games: [], playerGames: [], sources: {}, lastUpdated: null, historyWindow: "Nema podataka" };
 try { old = { ...old, ...JSON.parse(await fs.readFile(DATA_FILE, "utf8")) }; } catch {}
+const fullBackfill = process.env.FULL_BACKFILL === "true" || !(old.games || []).length;
 const gameMap = new Map((old.games || []).map(g => [g.id, g]));
 const errors = [];
 const daysToFetch = fullBackfill ? 35 : 8;
