@@ -166,3 +166,116 @@ for (const league of LEAGUES) {
   }
 }
 
+const games = [...gameMap.values()].sort((a,b) => new Date(a.date) - new Date(b.date));
+const finalGames = games.filter(g => g.status === "Završena" && g.homeScore !== null && g.awayScore !== null);
+const existingPlayerGames = new Map((old.playerGames || []).map(p => [p.gameId + "|" + p.id, p]));
+const nbaFinals = finalGames.filter(g => g.league === "NBA");
+const summariesToFetch = (fullBackfill ? nbaFinals.slice(-90) : nbaFinals.slice(-24)).filter(g => !g.playerStatsFetched || fullBackfill);
+let summariesSucceeded = 0;
+for (const game of summariesToFetch) {
+  const league = LEAGUES.find(l => l.name === game.league);
+  try {
+    const summary = await getJson("https://site.api.espn.com/apis/site/v2/sports/basketball/" + league.sport + "/summary?event=" + encodeURIComponent(game.eventId));
+    const rows = parsePlayerStats(summary, game);
+    if (rows.length) {
+      for (const row of rows) existingPlayerGames.set(row.gameId + "|" + row.id, row);
+      game.playerStatsFetched = true;
+      summariesSucceeded++;
+    }
+  } catch (e) { console.warn("NBA box score warning [" + game.id + "]: " + e.message); }
+  await wait(160);
+}
+// EuroLeague box scores come from its official public API. Throttle requests to avoid upstream rate limits.
+const euroFinals = games.filter(g => g.league === "EuroLeague" && g.status === "Završena" && g.homeScore !== null && g.awayScore !== null);
+const euroToFetch = (fullBackfill ? euroFinals.slice(-25) : euroFinals.slice(-3)).filter(g => !g.playerStatsFetched);
+let euroStatsFetched = 0;
+for (const game of euroToFetch) {
+  try {
+    const summary = await getJson("https://api-live.euroleague.net/v2/competitions/E/seasons/" + game.seasonCode + "/games/" + game.gameCode + "/stats");
+    const playerRows = [];
+    for (const side of ["local", "road"]) {
+      const sideData = summary[side] || {};
+      const teamName = sideData.club?.name || sideData.team?.name || sideData.name || (side === "local" ? game.home : game.away);
+      for (const p of sideData.players || []) {
+        const stats = p.stats || p.statistics || p;
+        const read = (...keys) => {
+          for (const key of keys) {
+            const v = stats[key] ?? stats[key.toLowerCase()];
+            if (v !== undefined && v !== null && v !== "") return v;
+          }
+          return null;
+        };
+        const number = v => { const n = Number(String(v ?? "").replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : null; };
+        const name = p.player?.name || p.person?.name || p.name || p.playerName || p.player_name || "Nepoznat igrač";
+        const id = p.player?.code || p.player?.id || p.person?.code || p.playerCode || p.player_code || name;
+        const points = number(read("points", "PTS"));
+        const rebounds = number(read("totalRebounds", "total_rebounds", "rebounds", "REB", "TREB"));
+        const assists = number(read("assists", "AST"));
+        if (points === null && rebounds === null && assists === null) continue;
+        playerRows.push({id:String(id).trim(),name:String(name).trim(),team:String(teamName).trim(),league:"EuroLeague",gameId:game.id,date:game.date,opponent:teamName===game.home?game.away:game.home,minutes:number(read("minutes", "MIN")),points,rebounds,assists,steals:number(read("steals","STL")),blocks:number(read("blocks","BLK")),turnovers:number(read("turnovers","TO")),threes:number(read("threePointersMade","three_pointers_made","3PM")),source:"Official EuroLeague box score"});
+      }
+    }
+    if (playerRows.length) {
+      for (const row of playerRows) existingPlayerGames.set(row.gameId + "|" + row.id, row);
+      game.playerStatsFetched = true;
+      euroStatsFetched++;
+    }
+  } catch (e) { console.warn("EuroLeague box score warning [" + game.id + "]: " + e.message); }
+  await wait(6500);
+}
+const updatedGames = games.map(g => gameMap.get(g.id));
+const playerGames = [...existingPlayerGames.values()].sort((a,b) => new Date(a.date)-new Date(b.date)).slice(-12000);
+let odds = old.odds || [];
+let oddsUpdatedAt = old.oddsUpdatedAt || null;
+if (process.env.ODDS_API_KEY) {
+  try {
+    const key = process.env.ODDS_API_KEY;
+    const sports = await getJson("https://api.the-odds-api.com/v4/sports/?apiKey=" + encodeURIComponent(key));
+    const supported = (sports || []).filter(s => s.active && /basketball.*(nba|euroleague)|basketball_nba/i.test((s.key || "") + " " + (s.title || "")));
+    const fresh = [];
+    for (const sport of supported) {
+      try {
+        const events = await getJson("https://api.the-odds-api.com/v4/sports/" + encodeURIComponent(sport.key) + "/odds/?apiKey=" + encodeURIComponent(key) + "&regions=us,eu&markets=h2h,spreads,totals&oddsFormat=decimal&dateFormat=iso");
+        const leagueName = /euroleague/i.test(sport.key + " " + sport.title) ? "EuroLeague" : "NBA";
+        for (const event of events || []) {
+          for (const book of event.bookmakers || []) {
+            const record = { id:String(event.id)+"|"+book.key,eventId:String(event.id),league:leagueName,home:event.home_team,away:event.away_team,date:event.commence_time,bookmaker:book.title||book.key,moneyline:null,spread:null,total:null };
+            for (const market of book.markets || []) {
+              if (market.key === "h2h") {
+                const h=market.outcomes?.find(o=>o.name===event.home_team),a=market.outcomes?.find(o=>o.name===event.away_team);
+                if(h&&a)record.moneyline={home:Number(h.price),away:Number(a.price),updatedAt:market.last_update||book.last_update};
+              } else if (market.key === "spreads") {
+                const h=market.outcomes?.find(o=>o.name===event.home_team),a=market.outcomes?.find(o=>o.name===event.away_team);
+                if(h&&a)record.spread={homePoint:Number(h.point),awayPoint:Number(a.point),homeOdds:Number(h.price),awayOdds:Number(a.price),updatedAt:market.last_update||book.last_update};
+              } else if (market.key === "totals") {
+                const over=market.outcomes?.find(o=>o.name==="Over"),under=market.outcomes?.find(o=>o.name==="Under");
+                if(over&&under)record.total={point:Number(over.point),overOdds:Number(over.price),underOdds:Number(under.price),updatedAt:market.last_update||book.last_update};
+              }
+            }
+            if(record.moneyline||record.spread||record.total)fresh.push(record);
+          }
+        }
+      } catch(e) { console.warn("Odds feed warning ["+sport.key+"]: "+e.message); }
+      await wait(200);
+    }
+    if(fresh.length){odds=fresh;oddsUpdatedAt=now.toISOString();}
+    console.log("Odds records received: "+fresh.length);
+  } catch(e) { console.warn("Odds provider unavailable: "+e.message); }
+}
+const result = {
+  schemaVersion: 1,
+  lastUpdated: now.toISOString(),
+  historyWindow: fullBackfill ? "Istorijski backfill: NBA 35 dana; EuroLeague 2024–2026" : "Automatsko ažuriranje: poslednjih 8 dana + sačuvana istorija",
+  games: updatedGames,
+  playerGames,
+  odds,
+  oddsUpdatedAt,
+  sources: {
+    NBA: { provider: "ESPN public scoreboard/box score", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "NBA").length },
+    EuroLeague: { provider: "Official EuroLeague public API", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "EuroLeague").length }
+  },
+  sync: { mode: fullBackfill ? "full-backfill" : "incremental", summariesAttempted: summariesToFetch.length, summariesSucceeded, euroStatsFetched, warnings: errors }
+};
+await fs.mkdir(new URL("../public/data/", import.meta.url), { recursive: true });
+await fs.writeFile(DATA_FILE, JSON.stringify(result));
+console.log("Saved " + updatedGames.length + " games and " + playerGames.length + " player-game lines; NBA box scores " + summariesSucceeded + "/" + summariesToFetch.length + "; EuroLeague box scores " + euroStatsFetched + "/" + euroToFetch.length + "; fullBackfill=" + fullBackfill);
