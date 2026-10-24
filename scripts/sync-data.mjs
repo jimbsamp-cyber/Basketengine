@@ -186,8 +186,9 @@ for (const game of summariesToFetch) {
   await wait(160);
 }
 // EuroLeague box scores come from its official public API. Throttle requests to avoid upstream rate limits.
-const euroFinals = games.filter(g => g.league === "EuroLeague" && g.status === "Završena" && g.homeScore !== null && g.awayScore !== null);
-const euroToFetch = (fullBackfill ? euroFinals.slice(-15) : euroFinals.slice(-2)).filter(g => !g.playerStatsFetched);
+const euroFinals = games.filter(g => g.league === "EuroLeague" && g.seasonCode === "E2026" && g.status === "Završena" && g.homeScore !== null && g.awayScore !== null);
+const missingEuroFinals = euroFinals.filter(g => !g.playerStatsFetched);
+const euroToFetch = fullBackfill ? missingEuroFinals.slice(-15) : missingEuroFinals.slice(-2);
 let euroStatsFetched = 0;
 for (const game of euroToFetch) {
   try {
