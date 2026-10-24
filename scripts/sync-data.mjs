@@ -239,6 +239,8 @@ const updatedGames = games.map(g => gameMap.get(g.id));
 const playerGames = [...existingPlayerGames.values()].sort((a,b) => new Date(a.date)-new Date(b.date)).slice(-12000);
 let odds = old.odds || [];
 let oddsUpdatedAt = old.oddsUpdatedAt || null;
+let playerPropOdds = old.playerPropOdds || [];
+let playerPropOddsUpdatedAt = old.playerPropOddsUpdatedAt || null;
 if (process.env.ODDS_API_KEY) {
   try {
     const key = process.env.ODDS_API_KEY;
@@ -274,6 +276,52 @@ if (process.env.ODDS_API_KEY) {
     console.log("Odds records received: "+fresh.length);
   } catch(e) { console.warn("Odds provider unavailable: "+e.message); }
 }
+// Player props are queried once daily to limit provider quota usage. They require an eligible plan/market.
+if (process.env.ODDS_API_KEY && now.getUTCHours() === 0) {
+  try {
+    const key = process.env.ODDS_API_KEY;
+    const sportsResponse = await getJson("https://api.the-odds-api.com/v4/sports/?apiKey=" + encodeURIComponent(key));
+    const nba = (Array.isArray(sportsResponse) ? sportsResponse : sportsResponse.data || []).find(s => s.key === "basketball_nba" && s.active);
+    if (nba) {
+      const eventResponse = await getJson("https://api.the-odds-api.com/v4/sports/" + nba.key + "/events/?apiKey=" + encodeURIComponent(key) + "&dateFormat=iso");
+      const upcomingEvents = (Array.isArray(eventResponse) ? eventResponse : eventResponse.data || eventResponse.events || [])
+        .filter(e => new Date(e.commence_time) > now)
+        .sort((a,b) => new Date(a.commence_time)-new Date(b.commence_time))
+        .slice(0,4);
+      const freshProps = [];
+      for (const event of upcomingEvents) {
+        try {
+          const detail = await getJson("https://api.the-odds-api.com/v4/sports/" + nba.key + "/events/" + encodeURIComponent(event.id) + "/odds/?apiKey=" + encodeURIComponent(key) + "&regions=us&markets=player_points,player_rebounds,player_assists&oddsFormat=decimal&dateFormat=iso");
+          const root = detail.data || detail;
+          for (const book of root.bookmakers || []) {
+            for (const market of book.markets || []) {
+              const grouped = new Map();
+              for (const outcome of market.outcomes || []) {
+                if (!outcome.description || !Number.isFinite(Number(outcome.point))) continue;
+                const id = String(outcome.description).trim() + "|" + String(outcome.point);
+                if (!grouped.has(id)) grouped.set(id, { player: String(outcome.description).trim(), line: Number(outcome.point), overOdds: null, underOdds: null });
+                const row = grouped.get(id);
+                if (outcome.name === "Over") row.overOdds = Number(outcome.price);
+                if (outcome.name === "Under") row.underOdds = Number(outcome.price);
+              }
+              for (const row of grouped.values()) {
+                if (row.overOdds > 1 && row.underOdds > 1) freshProps.push({
+                  id: [event.id, book.key, market.key, row.player, row.line].join("|"),
+                  eventId: String(event.id), league: "NBA", home: event.home_team, away: event.away_team,
+                  date: event.commence_time, bookmaker: book.title || book.key, market: market.key,
+                  player: row.player, line: row.line, overOdds: row.overOdds, underOdds: row.underOdds
+                });
+              }
+            }
+          }
+        } catch (e) { console.warn("Player props odds warning [" + event.id + "]: " + e.message); }
+        await wait(250);
+      }
+      if (freshProps.length) { playerPropOdds = freshProps; playerPropOddsUpdatedAt = now.toISOString(); }
+      console.log("Player prop odds received: " + freshProps.length);
+    }
+  } catch (e) { console.warn("Player props provider unavailable: " + e.message); }
+}
 const result = {
   schemaVersion: 1,
   lastUpdated: now.toISOString(),
@@ -282,6 +330,8 @@ const result = {
   playerGames,
   odds,
   oddsUpdatedAt,
+  playerPropOdds,
+  playerPropOddsUpdatedAt,
   sources: {
     NBA: { provider: "ESPN public scoreboard/box score", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "NBA").length },
     EuroLeague: { provider: "EuroLeague public API", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "EuroLeague").length }
