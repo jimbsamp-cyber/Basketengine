@@ -146,12 +146,51 @@ const updatedGames = games.map(g => gameMap.get(g.id));
 const playerGames = [...existingPlayerGames.values()].sort((a,b) => new Date(a.date)-new Date(b.date));
 // Retain all game results and the most recent 12,000 player-game lines to keep the static payload small.
 const trimmedPlayers = playerGames.slice(-12000);
+let odds = old.odds || [];
+let oddsUpdatedAt = old.oddsUpdatedAt || null;
+if (process.env.ODDS_API_KEY) {
+  try {
+    const key = process.env.ODDS_API_KEY;
+    const sports = await getJson("https://api.the-odds-api.com/v4/sports/?apiKey=" + encodeURIComponent(key));
+    const supported = (sports || []).filter(s => s.active && /basketball.*(nba|euroleague)|basketball_nba/i.test((s.key || "") + " " + (s.title || "")));
+    const fresh = [];
+    for (const sport of supported) {
+      try {
+        const events = await getJson("https://api.the-odds-api.com/v4/sports/" + encodeURIComponent(sport.key) + "/odds/?apiKey=" + encodeURIComponent(key) + "&regions=us,eu&markets=h2h,spreads,totals&oddsFormat=decimal&dateFormat=iso");
+        const leagueName = /euroleague/i.test(sport.key + " " + sport.title) ? "EuroLeague" : "NBA";
+        for (const event of events || []) {
+          for (const book of event.bookmakers || []) {
+            const record = { id: String(event.id) + "|" + book.key, eventId: String(event.id), league: leagueName, home: event.home_team, away: event.away_team, date: event.commence_time, bookmaker: book.title || book.key, moneyline: null, spread: null, total: null };
+            for (const market of book.markets || []) {
+              if (market.key === "h2h") {
+                const h = market.outcomes?.find(o => o.name === event.home_team), a = market.outcomes?.find(o => o.name === event.away_team);
+                if (h && a) record.moneyline = { home: Number(h.price), away: Number(a.price), updatedAt: market.last_update || book.last_update };
+              } else if (market.key === "spreads") {
+                const h = market.outcomes?.find(o => o.name === event.home_team), a = market.outcomes?.find(o => o.name === event.away_team);
+                if (h && a) record.spread = { homePoint: Number(h.point), awayPoint: Number(a.point), homeOdds: Number(h.price), awayOdds: Number(a.price), updatedAt: market.last_update || book.last_update };
+              } else if (market.key === "totals") {
+                const over = market.outcomes?.find(o => o.name === "Over"), under = market.outcomes?.find(o => o.name === "Under");
+                if (over && under) record.total = { point: Number(over.point), overOdds: Number(over.price), underOdds: Number(under.price), updatedAt: market.last_update || book.last_update };
+              }
+            }
+            if (record.moneyline || record.spread || record.total) fresh.push(record);
+          }
+        }
+      } catch (e) { console.warn("Odds feed warning [" + sport.key + "]: " + e.message); }
+      await wait(200);
+    }
+    if (fresh.length) { odds = fresh; oddsUpdatedAt = now.toISOString(); }
+    console.log("Odds records received: " + fresh.length);
+  } catch (e) { console.warn("Odds provider unavailable: " + e.message); }
+}
 const result = {
   schemaVersion: 1,
   lastUpdated: now.toISOString(),
   historyWindow: fullBackfill ? "Istorijski backfill pokrenut: NBA 35 dana; EuroLeague 2024–2026" : "Automatsko ažuriranje: poslednjih 8 dana + sačuvana istorija",
   games: updatedGames,
   playerGames: trimmedPlayers,
+  odds,
+  oddsUpdatedAt,
   sources: {
     NBA: { provider: "ESPN public scoreboard/box score", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "NBA").length },
     EuroLeague: { provider: "ESPN public scoreboard/box score", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "EuroLeague").length }
