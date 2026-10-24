@@ -88,7 +88,7 @@ function toEuroGame(g, seasonCode) {
     statusCode: played ? "post" : status === "Uživo" ? "in" : "pre",
     venue: g.venueName || g.venue_name || "",
     homeWinner: played && Number(hs) > Number(as),
-    source: "Official EuroLeague public API",
+    source: "EuroLeague public API",
     playerStatsFetched: false
   };
 }
@@ -154,7 +154,10 @@ for (const league of LEAGUES) {
     const seasons = fullBackfill ? ["E2024", "E2025", "E2026"] : ["E2026"];
     for (const seasonCode of seasons) {
       const rows = await fetchEuroLeagueSeason(seasonCode);
-      for (const g of rows) gameMap.set(g.id, g);
+      for (const g of rows) {
+        const previous = gameMap.get(g.id);
+        gameMap.set(g.id, previous ? { ...g, playerStatsFetched: previous.playerStatsFetched === true } : g);
+      }
       await wait(6500);
     }
     continue;
@@ -281,7 +284,7 @@ const result = {
   oddsUpdatedAt,
   sources: {
     NBA: { provider: "ESPN public scoreboard/box score", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "NBA").length },
-    EuroLeague: { provider: "Official EuroLeague public API", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "EuroLeague").length }
+    EuroLeague: { provider: "EuroLeague public API", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "EuroLeague").length }
   },
   sync: { mode: fullBackfill ? "full-backfill" : "incremental", summariesAttempted: summariesToFetch.length, summariesSucceeded, euroStatsFetched, warnings: errors }
 };
