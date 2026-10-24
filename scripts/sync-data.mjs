@@ -59,6 +59,52 @@ async function fetchRange(league, start, end) {
     return [];
   }
 }
+function toEuroGame(g, seasonCode) {
+  const pick = (...values) => values.find(v => v !== undefined && v !== null && v !== "");
+  const code = String(pick(g.gameCode, g.game_code, g.code, (g.identifier || "").split("_").pop(), g.id) || "");
+  const home = pick(g.localClubName, g.local_club_name, g.local?.club?.name, g.local?.team?.name, g.local?.name);
+  const away = pick(g.roadClubName, g.road_club_name, g.road?.club?.name, g.road?.team?.name, g.road?.name);
+  if (!home || !away) return null;
+  const date = pick(g.utcDate, g.utc_date, g.date, g.localDate, g.local_date);
+  const hs = pick(g.localScore, g.local_score, g.local?.score, g.local?.points);
+  const as = pick(g.roadScore, g.road_score, g.road?.score, g.road?.points);
+  const statusRaw = String(pick(g.gameStatus, g.game_status, g.status, "")).toLowerCase();
+  const played = g.played === true || statusRaw === "result" || statusRaw === "finished" || (hs != null && as != null && statusRaw !== "scheduled");
+  const status = played ? "Završena" : statusRaw === "live" ? "Uživo" : "Zakazana";
+  return {
+    id: "EuroLeague-" + seasonCode + "-" + code,
+    eventId: seasonCode + "_" + code,
+    gameCode: code,
+    seasonCode,
+    league: "EuroLeague",
+    date,
+    home: String(home),
+    away: String(away),
+    homeId: String(pick(g.localClubCode, g.local_club_code, g.local?.club?.code, "") || ""),
+    awayId: String(pick(g.roadClubCode, g.road_club_code, g.road?.club?.code, "") || ""),
+    homeScore: played && hs != null ? Number(hs) : null,
+    awayScore: played && as != null ? Number(as) : null,
+    status,
+    statusCode: played ? "post" : status === "Uživo" ? "in" : "pre",
+    venue: g.venueName || g.venue_name || "",
+    homeWinner: played && Number(hs) > Number(as),
+    source: "Official EuroLeague public API",
+    playerStatsFetched: false
+  };
+}
+async function fetchEuroLeagueSeason(seasonCode) {
+  try {
+    const url = "https://api-live.euroleague.net/v2/competitions/E/seasons/" + seasonCode + "/games?limit=1000&offset=0";
+    const json = await getJson(url);
+    const rows = Array.isArray(json) ? json : (json.data || json.games || []);
+    const games = rows.map(g => toEuroGame(g, seasonCode)).filter(Boolean);
+    console.log("EuroLeague " + seasonCode + ": " + games.length + " games");
+    return games;
+  } catch (e) {
+    console.warn("EuroLeague official API warning [" + seasonCode + "]: " + e.message);
+    return [];
+  }
+}
 function parsePlayerStats(summary, game) {
   const output = [];
   for (const group of summary.boxscore?.players || []) {
@@ -104,99 +150,19 @@ const gameMap = new Map((old.games || []).map(g => [g.id, g]));
 const errors = [];
 const daysToFetch = fullBackfill ? 35 : 8;
 for (const league of LEAGUES) {
-  if (fullBackfill && league.key === "EuroLeague") {
-    // Weekly windows keep requests manageable while covering the 2024-25 and 2025-26 seasons.
-    const start = new Date("2024-09-01T12:00:00Z");
-    const endLimit = new Date("2026-07-01T12:00:00Z");
-    for (let cursor = new Date(start); cursor < endLimit; cursor.setUTCDate(cursor.getUTCDate() + 7)) {
-      const end = new Date(cursor); end.setUTCDate(end.getUTCDate() + 6);
-      for (const g of await fetchRange(league, cursor, end > endLimit ? endLimit : end)) gameMap.set(g.id, g);
-      await wait(180);
+  if (league.key === "EuroLeague") {
+    const seasons = fullBackfill ? ["E2024", "E2025", "E2026"] : ["E2026"];
+    for (const seasonCode of seasons) {
+      const rows = await fetchEuroLeagueSeason(seasonCode);
+      for (const g of rows) gameMap.set(g.id, g);
+      await wait(6500);
     }
-    for (const g of await fetchDay(league, now)) gameMap.set(g.id, g);
-  } else {
-    for (let i = daysToFetch - 1; i >= 0; i--) {
-      const date = new Date(now); date.setUTCDate(date.getUTCDate() - i);
-      for (const g of await fetchDay(league, date)) gameMap.set(g.id, g);
-      await wait(100);
-    }
+    continue;
+  }
+  for (let i = daysToFetch - 1; i >= 0; i--) {
+    const date = new Date(now); date.setUTCDate(date.getUTCDate() - i);
+    for (const g of await fetchDay(league, date)) gameMap.set(g.id, g);
+    await wait(100);
   }
 }
-const games = [...gameMap.values()].sort((a,b) => new Date(a.date) - new Date(b.date));
-const finalGames = games.filter(g => g.status === "Završena" && g.homeScore !== null && g.awayScore !== null);
-const existingPlayerGames = new Map((old.playerGames || []).map(p => [p.gameId + "|" + p.id, p]));
-const summariesToFetch = (fullBackfill ? finalGames.slice(-90) : finalGames.slice(-24)).filter(g => !g.playerStatsFetched || fullBackfill);
-let summariesSucceeded = 0;
-for (const game of summariesToFetch) {
-  const league = LEAGUES.find(l => l.name === game.league);
-  try {
-    const summary = await getJson(`https://site.api.espn.com/apis/site/v2/sports/basketball/${league.sport}/summary?event=${game.eventId}`);
-    const rows = parsePlayerStats(summary, game);
-    if (rows.length) {
-      for (const row of rows) existingPlayerGames.set(row.gameId + "|" + row.id, row);
-      game.playerStatsFetched = true;
-      summariesSucceeded++;
-    }
-  } catch (e) {
-    console.warn(`Box score warning [${game.id}]: ${e.message}`);
-  }
-  await wait(160);
-}
-const updatedGames = games.map(g => gameMap.get(g.id));
-const playerGames = [...existingPlayerGames.values()].sort((a,b) => new Date(a.date)-new Date(b.date));
-// Retain all game results and the most recent 12,000 player-game lines to keep the static payload small.
-const trimmedPlayers = playerGames.slice(-12000);
-let odds = old.odds || [];
-let oddsUpdatedAt = old.oddsUpdatedAt || null;
-if (process.env.ODDS_API_KEY) {
-  try {
-    const key = process.env.ODDS_API_KEY;
-    const sports = await getJson("https://api.the-odds-api.com/v4/sports/?apiKey=" + encodeURIComponent(key));
-    const supported = (sports || []).filter(s => s.active && /basketball.*(nba|euroleague)|basketball_nba/i.test((s.key || "") + " " + (s.title || "")));
-    const fresh = [];
-    for (const sport of supported) {
-      try {
-        const events = await getJson("https://api.the-odds-api.com/v4/sports/" + encodeURIComponent(sport.key) + "/odds/?apiKey=" + encodeURIComponent(key) + "&regions=us,eu&markets=h2h,spreads,totals&oddsFormat=decimal&dateFormat=iso");
-        const leagueName = /euroleague/i.test(sport.key + " " + sport.title) ? "EuroLeague" : "NBA";
-        for (const event of events || []) {
-          for (const book of event.bookmakers || []) {
-            const record = { id: String(event.id) + "|" + book.key, eventId: String(event.id), league: leagueName, home: event.home_team, away: event.away_team, date: event.commence_time, bookmaker: book.title || book.key, moneyline: null, spread: null, total: null };
-            for (const market of book.markets || []) {
-              if (market.key === "h2h") {
-                const h = market.outcomes?.find(o => o.name === event.home_team), a = market.outcomes?.find(o => o.name === event.away_team);
-                if (h && a) record.moneyline = { home: Number(h.price), away: Number(a.price), updatedAt: market.last_update || book.last_update };
-              } else if (market.key === "spreads") {
-                const h = market.outcomes?.find(o => o.name === event.home_team), a = market.outcomes?.find(o => o.name === event.away_team);
-                if (h && a) record.spread = { homePoint: Number(h.point), awayPoint: Number(a.point), homeOdds: Number(h.price), awayOdds: Number(a.price), updatedAt: market.last_update || book.last_update };
-              } else if (market.key === "totals") {
-                const over = market.outcomes?.find(o => o.name === "Over"), under = market.outcomes?.find(o => o.name === "Under");
-                if (over && under) record.total = { point: Number(over.point), overOdds: Number(over.price), underOdds: Number(under.price), updatedAt: market.last_update || book.last_update };
-              }
-            }
-            if (record.moneyline || record.spread || record.total) fresh.push(record);
-          }
-        }
-      } catch (e) { console.warn("Odds feed warning [" + sport.key + "]: " + e.message); }
-      await wait(200);
-    }
-    if (fresh.length) { odds = fresh; oddsUpdatedAt = now.toISOString(); }
-    console.log("Odds records received: " + fresh.length);
-  } catch (e) { console.warn("Odds provider unavailable: " + e.message); }
-}
-const result = {
-  schemaVersion: 1,
-  lastUpdated: now.toISOString(),
-  historyWindow: fullBackfill ? "Istorijski backfill pokrenut: NBA 35 dana; EuroLeague 2024–2026" : "Automatsko ažuriranje: poslednjih 8 dana + sačuvana istorija",
-  games: updatedGames,
-  playerGames: trimmedPlayers,
-  odds,
-  oddsUpdatedAt,
-  sources: {
-    NBA: { provider: "ESPN public scoreboard/box score", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "NBA").length },
-    EuroLeague: { provider: "ESPN public scoreboard/box score", checkedAt: now.toISOString(), games: updatedGames.filter(g => g.league === "EuroLeague").length }
-  },
-  sync: { mode: fullBackfill ? "full-backfill" : "incremental", summariesAttempted: summariesToFetch.length, summariesSucceeded, warnings: errors }
-};
-await fs.mkdir(new URL("../public/data/", import.meta.url), { recursive: true });
-await fs.writeFile(DATA_FILE, JSON.stringify(result));
-console.log(`Saved ${updatedGames.length} games and ${trimmedPlayers.length} player-game lines; box scores ${summariesSucceeded}/${summariesToFetch.length}; fullBackfill=${fullBackfill}`);
+
