@@ -12,7 +12,7 @@ const dayParam = d => isoDay(d).replaceAll("-", "");
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const getJson = async url => {
   const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "BasketballProjectionEngine/1.0" }, signal: AbortSignal.timeout(15000) });
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url.replace(/apiKey=[^&]+/, "apiKey=REDACTED")}`);
   return response.json();
 };
 const toGame = (event, league) => {
@@ -193,10 +193,14 @@ for (const game of euroToFetch) {
   try {
     const summary = await getJson("https://api-live.euroleague.net/v2/competitions/E/seasons/" + game.seasonCode + "/games/" + game.gameCode + "/stats");
     const playerRows = [];
+    const root = summary.data || summary;
     for (const side of ["local", "road"]) {
-      const sideData = summary[side] || {};
+      const sideData = root[side] || {};
       const teamName = sideData.club?.name || sideData.team?.name || sideData.name || (side === "local" ? game.home : game.away);
       for (const p of sideData.players || []) {
+        const player = p.player || {};
+        const person = player.person || p.person || {};
+        const club = player.club || p.club || {};
         const stats = p.stats || p.statistics || p;
         const read = (...keys) => {
           for (const key of keys) {
@@ -206,15 +210,19 @@ for (const game of euroToFetch) {
           return null;
         };
         const number = v => { const n = Number(String(v ?? "").replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : null; };
-        const name = p.player?.name || p.person?.name || p.name || p.playerName || p.player_name || "Nepoznat igrač";
-        const id = p.player?.code || p.player?.id || p.person?.code || p.playerCode || p.player_code || name;
+        const name = person.name || player.name || p.name || p.playerName || p.player_name || "Nepoznat igrač";
+        const id = person.code || person.id || player.code || player.id || p.playerCode || p.player_code || name;
         const points = number(read("points", "PTS"));
         const rebounds = number(read("totalRebounds", "total_rebounds", "rebounds", "REB", "TREB"));
-        const assists = number(read("assists", "AST"));
+        const assists = number(read("assistances", "assists", "AST"));
         if (points === null && rebounds === null && assists === null) continue;
-        playerRows.push({id:String(id).trim(),name:String(name).trim(),team:String(teamName).trim(),league:"EuroLeague",gameId:game.id,date:game.date,opponent:teamName===game.home?game.away:game.home,minutes:number(read("minutes", "MIN")),points,rebounds,assists,steals:number(read("steals","STL")),blocks:number(read("blocks","BLK")),turnovers:number(read("turnovers","TO")),threes:number(read("threePointersMade","three_pointers_made","3PM")),source:"Official EuroLeague box score"});
+        const minutesRaw = number(read("timePlayed", "minutes", "MIN"));
+        const minutes = minutesRaw === null ? null : (minutesRaw > 100 ? minutesRaw / 60 : minutesRaw);
+        const team = club.name || teamName;
+        playerRows.push({id:String(id).trim(),name:String(name).trim(),team:String(team).trim(),league:"EuroLeague",gameId:game.id,date:game.date,opponent:team===game.home?game.away:game.home,minutes,points,rebounds,assists,steals:number(read("steals","STL")),blocks:number(read("blocksFavour","blocks_favour","blocks","BLK")),turnovers:number(read("turnovers","TO")),threes:number(read("fieldGoalsMade3","field_goals_made3","3PM")),source:"Official EuroLeague box score"});
       }
     }
+    if (!playerRows.length) console.warn("EuroLeague stats empty [" + game.id + "]: root=" + Object.keys(root).join(",") + "; local=" + Object.keys(root.local || {}).join(",") + "; players=" + ((root.local?.players || []).length));
     if (playerRows.length) {
       for (const row of playerRows) existingPlayerGames.set(row.gameId + "|" + row.id, row);
       game.playerStatsFetched = true;
