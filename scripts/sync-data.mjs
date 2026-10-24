@@ -11,7 +11,7 @@ const isoDay = d => d.toISOString().slice(0, 10);
 const dayParam = d => isoDay(d).replaceAll("-", "");
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const getJson = async url => {
-  const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "BasketballProjectionEngine/1.0" } });
+  const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "BasketballProjectionEngine/1.0" }, signal: AbortSignal.timeout(15000) });
   if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
   return response.json();
 };
@@ -31,8 +31,8 @@ const toGame = (event, league) => {
     away: away.team.displayName || away.team.name,
     homeId: String(home.team.id || ""),
     awayId: String(away.team.id || ""),
-    homeScore: Number.isFinite(Number(home.score)) ? Number(home.score) : null,
-    awayScore: Number.isFinite(Number(away.score)) ? Number(away.score) : null,
+    homeScore: home.score == null || home.score === "" ? null : (Number.isFinite(Number(home.score)) ? Number(home.score) : null),
+    awayScore: away.score == null || away.score === "" ? null : (Number.isFinite(Number(away.score)) ? Number(away.score) : null),
     status: state === "post" ? "Završena" : state === "in" ? "Uživo" : "Zakazana",
     statusCode: state || "pre",
     venue: comp?.venue?.fullName || "",
@@ -69,7 +69,7 @@ function toEuroGame(g, seasonCode) {
   const hs = pick(g.localScore, g.local_score, g.local?.score, g.local?.points);
   const as = pick(g.roadScore, g.road_score, g.road?.score, g.road?.points);
   const statusRaw = String(pick(g.gameStatus, g.game_status, g.status, "")).toLowerCase();
-  const played = g.played === true || statusRaw === "result" || statusRaw === "finished" || (hs != null && as != null && statusRaw !== "scheduled");
+  const played = g.played === true || ["result", "finished", "final", "played"].includes(statusRaw) || (!!date && new Date(date) < now && hs != null && as != null && Number(hs) + Number(as) > 0 && statusRaw !== "scheduled");
   const status = played ? "Završena" : statusRaw === "live" ? "Uživo" : "Zakazana";
   return {
     id: "EuroLeague-" + seasonCode + "-" + code,
@@ -187,7 +187,7 @@ for (const game of summariesToFetch) {
 }
 // EuroLeague box scores come from its official public API. Throttle requests to avoid upstream rate limits.
 const euroFinals = games.filter(g => g.league === "EuroLeague" && g.status === "Završena" && g.homeScore !== null && g.awayScore !== null);
-const euroToFetch = (fullBackfill ? euroFinals.slice(-25) : euroFinals.slice(-3)).filter(g => !g.playerStatsFetched);
+const euroToFetch = (fullBackfill ? euroFinals.slice(-15) : euroFinals.slice(-2)).filter(g => !g.playerStatsFetched);
 let euroStatsFetched = 0;
 for (const game of euroToFetch) {
   try {
