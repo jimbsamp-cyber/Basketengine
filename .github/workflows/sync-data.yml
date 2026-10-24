@@ -43,5 +43,6 @@ jobs:
             echo "No data changes to commit"
           else
             git commit -m "chore: refresh basketball data"
+            git pull --rebase origin main
             git push
           fi
